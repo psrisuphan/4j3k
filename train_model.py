@@ -25,6 +25,76 @@ ID2LABEL: Dict[int, str] = {v: k for k, v in LABEL2ID.items()}
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
+def _is_rocm_runtime() -> bool:
+    """Return True when PyTorch is built with ROCm/HIP support."""
+
+    return bool(getattr(torch.version, "hip", None))
+
+
+def _resolve_target_device(requested: str) -> str:
+    """Resolve the execution device, preferring accelerators when available."""
+
+    choice = requested.lower()
+    if choice == "cpu":
+        return "cpu"
+    if choice in {"cuda", "gpu", "rocm", "hip"}:
+        if torch.cuda.is_available():
+            return "cuda"
+        if _is_rocm_runtime():
+            raise RuntimeError(
+                "ROCm runtime detected but no GPU is visible. Check your AMD drivers and permissions."
+            )
+        raise RuntimeError("CUDA/ROCm requested but no compatible GPU is available.")
+    if choice == "mps":
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+        raise RuntimeError("MPS requested but no Apple GPU backend is available.")
+    if choice != "auto":
+        raise ValueError(f"Unsupported device selection '{requested}'.")
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    if _is_rocm_runtime():
+        # hip runtime present but no visible device – fall back to CPU to stay safe
+        return "cpu"
+    return "cpu"
+
+
+def _configure_trainable_layers(
+    model: AutoModelForSequenceClassification, layer_count: int
+) -> None:
+    """Freeze or partially unfreeze encoder layers based on *layer_count*."""
+
+    if layer_count < 0:
+        return
+
+    encoder = getattr(model, "base_model", None)
+    if encoder is None and hasattr(model, "base_model_prefix"):
+        encoder = getattr(model, model.base_model_prefix, None)
+    if encoder is None:
+        raise ValueError("Could not identify the base encoder module to adjust trainable layers.")
+
+    for param in encoder.parameters():
+        param.requires_grad = False
+
+    if layer_count == 0:
+        return
+
+    encoder_module = getattr(encoder, "encoder", None)
+    layers = getattr(encoder_module, "layer", None) if encoder_module is not None else None
+    if layers is None:
+        raise ValueError("Encoder module does not expose an iterable 'layer' attribute.")
+
+    layers = list(layers)
+    if layer_count > len(layers):
+        layer_count = len(layers)
+
+    for layer in layers[-layer_count:]:
+        for param in layer.parameters():
+            param.requires_grad = True
+
 def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df = df.dropna(subset=["Message", "Hatespeech"])
@@ -131,6 +201,15 @@ def parse_args() -> argparse.Namespace:
         help="Only train the classification head (useful when CPU-bound).",
     )
     parser.add_argument(
+        "--trainable-layer-count",
+        type=int,
+        default=-1,
+        help=(
+            "Number of encoder transformer blocks to fine-tune. "
+            "-1 trains the entire encoder, 0 freezes it, positive values unfreeze only the top-N layers."
+        ),
+    )
+    parser.add_argument(
         "--cpu-threads",
         type=int,
         default=None,
@@ -141,6 +220,17 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Override number of workers for data loading (defaults to min(4, cores)).",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps", "rocm", "hip", "gpu"),
+        default="auto",
+        help="Preferred execution device; defaults to automatic accelerator detection.",
+    )
+    parser.add_argument(
+        "--hip-gfx-override",
+        default=None,
+        help="Optional HSA_OVERRIDE_GFX_VERSION value for older AMD GPUs when using ROCm.",
     )
     parser.add_argument(
         "--learning-rate",
@@ -186,20 +276,42 @@ def main() -> None:
         label2id=LABEL2ID,
     )
 
+    effective_layer_count = args.trainable_layer_count
     if args.freeze_encoder:
-        encoder = getattr(model, "base_model", None)
-        if encoder is None and hasattr(model, "base_model_prefix"):
-            encoder = getattr(model, model.base_model_prefix, None)
-        if encoder is None:
-            raise ValueError("Could not identify base encoder module to freeze.")
-        for param in encoder.parameters():
-            param.requires_grad = False
+        effective_layer_count = 0
+    _configure_trainable_layers(model, effective_layer_count)
 
     dataloader_workers = (
         args.dataloader_workers
         if args.dataloader_workers is not None
         else max(1, min(4, os.cpu_count() or 1))
     )
+
+    target_device = _resolve_target_device(args.device)
+    use_cuda = target_device == "cuda"
+    use_mps = target_device == "mps"
+
+    if use_mps:
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    if use_cuda and _is_rocm_runtime():
+        if args.hip_gfx_override:
+            os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", args.hip_gfx_override)
+        else:
+            try:
+                name = torch.cuda.get_device_name(0).lower()
+            except torch.cuda.CudaError:
+                name = ""
+            if any(token in name for token in {"5700", "5600", "navi 10"}):
+                os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        os.environ.setdefault("HIP_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES", "0"))
+
+    if target_device == "cpu":
+        threads = args.cpu_threads or (os.cpu_count() or 1)
+        torch.set_num_threads(threads)
+        torch.set_num_interop_threads(max(1, min(threads, 4)))
+        if torch.backends.mkldnn.is_available():
+            torch.backends.mkldnn.enabled = True
+        torch.set_float32_matmul_precision("medium")
 
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
@@ -215,17 +327,17 @@ def main() -> None:
         metric_for_best_model="f1",
         do_eval=True,
         dataloader_num_workers=dataloader_workers,
+        dataloader_pin_memory=use_cuda or use_mps,
+        no_cuda=not use_cuda,
+        use_mps_device=use_mps,
         torch_compile=False,
     )
 
-    if torch.cuda.is_available():
-        if 0.0 < args.max_gpu_memory_fraction < 1.0:
+    if use_cuda and 0.0 < args.max_gpu_memory_fraction < 1.0:
+        try:
             torch.cuda.set_per_process_memory_fraction(args.max_gpu_memory_fraction)
-    else:
-        if args.cpu_threads:
-            threads = max(1, min(args.cpu_threads, os.cpu_count() or 1))
-            torch.set_num_threads(threads)
-            torch.set_num_interop_threads(threads)
+        except (AttributeError, RuntimeError):
+            pass
 
     trainer = Trainer(
         model=model,
