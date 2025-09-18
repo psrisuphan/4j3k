@@ -5,16 +5,17 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 import pandas as pd
 from datasets import Dataset, DatasetDict
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import torch
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
+    DataCollatorWithPadding,
+    PreTrainedTokenizerBase,
     Trainer,
     TrainingArguments,
 )
@@ -28,7 +29,9 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 def _is_rocm_runtime() -> bool:
     """Return True when PyTorch is built with ROCm/HIP support."""
 
-    return bool(getattr(torch.version, "hip", None))
+    torch_version = getattr(torch, "version", None)
+    hip_version = getattr(torch_version, "hip", None) if torch_version is not None else None
+    return bool(hip_version)
 
 
 def _resolve_target_device(requested: str) -> str:
@@ -71,8 +74,10 @@ def _configure_trainable_layers(
         return
 
     encoder = getattr(model, "base_model", None)
-    if encoder is None and hasattr(model, "base_model_prefix"):
-        encoder = getattr(model, model.base_model_prefix, None)
+    if encoder is None:
+        prefix = getattr(model, "base_model_prefix", None)
+        if prefix:
+            encoder = getattr(model, prefix, None)
     if encoder is None:
         raise ValueError("Could not identify the base encoder module to adjust trainable layers.")
 
@@ -106,28 +111,30 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
 def _split_dataset(
     df: pd.DataFrame, test_size: float, seed: int
 ) -> Tuple[Dataset, Dataset]:
-    train_df, eval_df = train_test_split(
-        df,
+    base_dataset = Dataset.from_pandas(df, preserve_index=False)
+    split_dataset = base_dataset.train_test_split(
         test_size=test_size,
-        random_state=seed,
-        stratify=df["label"],
+        seed=seed,
+        stratify_by_column="label",
     )
-    return Dataset.from_pandas(train_df, preserve_index=False), Dataset.from_pandas(
-        eval_df, preserve_index=False
-    )
+    return split_dataset["train"], split_dataset["test"]
 
 
-def _tokenize(tokenizer: AutoTokenizer, dataset: Dataset, max_length: int) -> Dataset:
+def _tokenize(tokenizer: PreTrainedTokenizerBase, dataset: Dataset, max_length: int) -> Dataset:
     text_columns = [col for col in dataset.column_names if col not in {"label"}]
-    return dataset.map(
-        lambda examples: tokenizer(
+    def _batch_tokenize(examples: Dict[str, List[str]]):
+        return tokenizer(
             examples["Message"],
             truncation=True,
-            padding="max_length",
             max_length=max_length,
-        ),
+        )
+
+    return dataset.map(
+        _batch_tokenize,
         batched=True,
         remove_columns=text_columns,
+        load_from_cache_file=True,
+        desc="Tokenizing dataset",
     )
 
 
@@ -239,6 +246,31 @@ def parse_args() -> argparse.Namespace:
         help="Learning rate for AdamW.",
     )
     parser.add_argument(
+        "--lr-scheduler",
+        choices=(
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+        ),
+        default="linear",
+        help="Scheduler applied to the optimizer learning rate.",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=0,
+        help="Number of warmup steps for the scheduler (overrides warmup ratio when >0).",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.0,
+        help="Warmup proportion of total training steps when warmup steps is 0.",
+    )
+    parser.add_argument(
         "--weight-decay",
         type=float,
         default=0.01,
@@ -253,11 +285,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility."
     )
+    parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Enable mixed precision (fp16) training when the hardware supports it.",
+    )
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Enable mixed precision (bf16) training on supported hardware.",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Use gradient checkpointing to trade compute for lower memory usage.",
+    )
+    parser.add_argument(
+        "--group-by-length",
+        action="store_true",
+        help="Group batches by sequence length to reduce padding overhead.",
+    )
+    parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        help="Enable torch.compile for potential speedups (requires PyTorch 2.0+).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.fp16 and args.bf16:
+        raise ValueError("fp16 and bf16 modes are mutually exclusive; choose only one.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     df = _load_dataframe(args.data)
@@ -268,6 +327,8 @@ def main() -> None:
     tokenized_eval = _tokenize(tokenizer, eval_ds, args.max_length)
 
     dataset_dict = DatasetDict({"train": tokenized_train, "eval": tokenized_eval})
+    train_dataset = cast(Any, dataset_dict["train"])  # appease static type checkers
+    eval_dataset = cast(Any, dataset_dict["eval"])  # appease static type checkers
 
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name,
@@ -290,6 +351,12 @@ def main() -> None:
     target_device = _resolve_target_device(args.device)
     use_cuda = target_device == "cuda"
     use_mps = target_device == "mps"
+
+    pad_to_multiple = 8 if use_cuda else None
+    data_collator = DataCollatorWithPadding(
+        tokenizer=tokenizer,
+        pad_to_multiple_of=pad_to_multiple,
+    )
 
     if use_mps:
         os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -318,6 +385,7 @@ def main() -> None:
         eval_strategy="epoch",
         save_strategy="epoch",
         learning_rate=args.learning_rate,
+        lr_scheduler_type=args.lr_scheduler,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=max(1, args.gradient_accumulation),
@@ -330,7 +398,13 @@ def main() -> None:
         dataloader_pin_memory=use_cuda or use_mps,
         no_cuda=not use_cuda,
         use_mps_device=use_mps,
-        torch_compile=False,
+        fp16=args.fp16,
+        bf16=args.bf16,
+        warmup_steps=max(0, args.warmup_steps),
+        warmup_ratio=max(0.0, args.warmup_ratio) if args.warmup_steps <= 0 else 0.0,
+        gradient_checkpointing=args.gradient_checkpointing,
+        group_by_length=args.group_by_length,
+        torch_compile=args.torch_compile,
     )
 
     if use_cuda and 0.0 < args.max_gpu_memory_fraction < 1.0:
@@ -341,18 +415,19 @@ def main() -> None:
 
     trainer = Trainer(
         model=model,
-        tokenizer=tokenizer,
         args=training_args,
-        train_dataset=dataset_dict["train"],
-        eval_dataset=dataset_dict["eval"],
+        data_collator=data_collator,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         compute_metrics=_compute_metrics,
     )
+    trainer.tokenizer = tokenizer
 
     trainer.train()
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
 
-    metrics = trainer.evaluate(dataset_dict["eval"])
+    metrics = trainer.evaluate(cast(Any, eval_dataset))
     serializable_metrics = {k: float(v) for k, v in metrics.items()}
     metrics_path = args.output_dir / "eval_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as fp:

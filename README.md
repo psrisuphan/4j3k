@@ -29,6 +29,10 @@ Key options:
 - `--device auto|cpu|cuda|mps`: choose the execution device.
 - `--freeze-encoder` or `--trainable-layer-count N`: control how much of the backbone to fine-tune.
 - `--max-length`, `--learning-rate`, `--gradient-accumulation`: adjust training performance.
+- `--lr-scheduler`, `--warmup-steps`, `--warmup-ratio`: configure the learning-rate schedule and warmup strategy.
+- `--fp16` / `--bf16`: enable mixed-precision training on supported hardware.
+- `--gradient-checkpointing`, `--group-by-length`: trade compute for lower memory and reduce padding overhead.
+- `--torch-compile`: turn on PyTorch 2.x graph capture for potential throughput gains.
 
 ### 4. Run inference
 After training finishes, score new text with age-aware post-processing:
