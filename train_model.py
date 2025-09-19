@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
 
 import pandas as pd
-from datasets import Dataset, DatasetDict
+from datasets import ClassLabel, Dataset, DatasetDict, Features, Value
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 import torch
 from transformers import (
@@ -111,7 +111,14 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
 def _split_dataset(
     df: pd.DataFrame, test_size: float, seed: int
 ) -> Tuple[Dataset, Dataset]:
-    base_dataset = Dataset.from_pandas(df, preserve_index=False)
+    label_names = [ID2LABEL[idx] for idx in range(len(ID2LABEL))]
+    features = Features(
+        {
+            "Message": Value("string"),
+            "label": ClassLabel(num_classes=len(label_names), names=label_names),
+        }
+    )
+    base_dataset = Dataset.from_pandas(df, preserve_index=False, features=features)
     split_dataset = base_dataset.train_test_split(
         test_size=test_size,
         seed=seed,
