@@ -44,10 +44,13 @@ def _resolve_target_device(requested: str) -> str:
         if torch.cuda.is_available():
             return "cuda"
         if _is_rocm_runtime():
-            raise RuntimeError(
-                "ROCm runtime detected but no GPU is visible. Check your AMD drivers and permissions."
+            print(
+                "[device] ROCm runtime detected but no compatible GPU; falling back to CPU.",
+                flush=True,
             )
-        raise RuntimeError("CUDA/ROCm requested but no compatible GPU is available.")
+            return "cpu"
+        print("[device] CUDA requested but no compatible GPU is available; using CPU instead.", flush=True)
+        return "cpu"
     if choice == "mps":
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             return "mps"

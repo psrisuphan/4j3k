@@ -12,6 +12,27 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from age_policy import AgePolicy, resolve_policy
 
 
+def _select_device(explicit: Optional[str] = None) -> str:
+    """Choose an execution device, falling back gracefully when accelerators fail."""
+
+    if explicit:
+        return explicit
+    if torch.cuda.is_available():
+        try:
+            torch.zeros(1).to("cuda")
+            return "cuda"
+        except RuntimeError:
+            print("[device] CUDA reported available but failed; using CPU instead.", flush=True)
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend and torch.backends.mps.is_available():
+        try:
+            torch.zeros(1).to("mps")
+            return "mps"
+        except RuntimeError:
+            print("[device] MPS backend failed to initialise; falling back to CPU.", flush=True)
+    return "cpu"
+
+
 class TransformerAgeAwareClassifier:
     """Wrap a Transformers sequence classifier with age-based policies."""
 
@@ -24,14 +45,45 @@ class TransformerAgeAwareClassifier:
         self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
         self.model.eval()
 
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
+        max_len = getattr(self.tokenizer, "model_max_length", 512)
+        if not isinstance(max_len, int) or max_len <= 0 or max_len > 4096:
+            max_len = 512
+        self.max_length = max_len
+
+        self.device = _select_device(device)
+        try:
+            self.model.to(self.device)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "hip error" in message or "invalid device function" in message:
+                print("[device] Accelerator failed with HIP error; retrying on CPU.", flush=True)
+                self.device = "cpu"
+                self.model.to(self.device)
+            else:
+                raise
 
     def _score_text(self, text: str) -> float:
-        encoded = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True)
+        encoded = self.tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=self.max_length,
+        )
         encoded = {k: v.to(self.device) for k, v in encoded.items()}
         with torch.no_grad():
-            logits = self.model(**encoded).logits
+            try:
+                logits = self.model(**encoded).logits
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                if "hip error" in message or "invalid device function" in message:
+                    print("[device] Runtime HIP failure during inference; switching to CPU.", flush=True)
+                    self.device = "cpu"
+                    self.model.to(self.device)
+                    encoded = {k: v.to(self.device) for k, v in encoded.items()}
+                    logits = self.model(**encoded).logits
+                else:
+                    raise
             probabilities = torch.nn.functional.softmax(logits, dim=-1)
         return float(probabilities[:, 1].item())
 
