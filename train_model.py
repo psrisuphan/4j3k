@@ -169,6 +169,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to the labelled CSV dataset.",
     )
     parser.add_argument(
+        "--extra-data",
+        type=Path,
+        nargs="*",
+        default=[Path("data/ThaiToxicityTweet_converted.csv")],
+        help=(
+            "Optional additional CSV dataset(s) with the same schema. "
+            "Specify --extra-data without values to disable the defaults."
+        ),
+    )
+    parser.add_argument(
         "--model-name",
         default="airesearch/wangchanberta-base-att-spm-uncased",
         help="Backbone model to fine-tune.",
@@ -326,7 +336,26 @@ def main() -> None:
         raise ValueError("fp16 and bf16 modes are mutually exclusive; choose only one.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = _load_dataframe(args.data)
+    dataframes: List[pd.DataFrame] = []
+
+    if args.data.exists():
+        dataframes.append(_load_dataframe(args.data))
+    else:
+        raise FileNotFoundError(f"Primary dataset '{args.data}' not found.")
+
+    extra_paths = args.extra_data or []
+    for extra_path in extra_paths:
+        if extra_path.exists():
+            dataframes.append(_load_dataframe(extra_path))
+        else:
+            print(
+                f"Warning: extra dataset '{extra_path}' not found; continuing without it.",
+                flush=True,
+            )
+
+    df = pd.concat(dataframes, ignore_index=True)
+    df = df.drop_duplicates(subset=["Message", "label"]).reset_index(drop=True)
+
     train_ds, eval_ds = _split_dataset(df, args.test_size, args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
