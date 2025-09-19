@@ -403,7 +403,7 @@ def main() -> None:
         do_eval=True,
         dataloader_num_workers=dataloader_workers,
         dataloader_pin_memory=use_cuda or use_mps,
-        no_cuda=not use_cuda,
+        no_cuda=not (use_cuda or use_mps),
         use_mps_device=use_mps,
         fp16=args.fp16,
         bf16=args.bf16,
