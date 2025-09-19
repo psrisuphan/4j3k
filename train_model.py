@@ -2,18 +2,14 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
 
-import numpy as np
 import pandas as pd
-import requests
-from datasets import ClassLabel, Dataset, DatasetDict, Features, Value, load_dataset
+from datasets import ClassLabel, Dataset, DatasetDict, Features, Value
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-import zipfile
 import torch
 from transformers import (
     AutoModelForSequenceClassification,
@@ -112,137 +108,6 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     return df[["Message", "label"]]
 
 
-def _load_thai_toxicity_dataset(split: str) -> Dataset:
-    """Download and load the Thai Toxicity Tweet dataset without relying on HF scripts."""
-
-    if split != "train":
-        raise ValueError(
-            "SEACrowd/thai_toxicity_tweet only provides a 'train' split; "
-            f"received '{split}'."
-        )
-
-    zip_url = "https://archive.org/download/ThaiToxicityTweetCorpus/data.zip"
-    try:
-        response = requests.get(zip_url, timeout=60)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise RuntimeError(
-            "Failed to download Thai Toxicity Tweet corpus from archive.org. "
-            "Check your network connection or specify --no-hf-dataset to skip it."
-        ) from exc
-
-    try:
-        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
-            with zf.open("data/train.jsonl") as fh:
-                df = pd.read_json(fh, lines=True)
-    except (KeyError, zipfile.BadZipFile, ValueError) as exc:
-        raise RuntimeError("Downloaded Thai toxicity archive is corrupted or has unexpected format.") from exc
-
-    return Dataset.from_pandas(df, preserve_index=False)
-
-
-def _load_hf_dataframe(
-    dataset_id: str,
-    text_column: str,
-    label_column: str,
-    dataset_config: str | None,
-    dataset_split: str,
-) -> pd.DataFrame:
-    """Load and normalize a Hugging Face dataset to match the CSV schema."""
-
-    dataset_kwargs: Dict[str, Any] = {}
-    if dataset_config:
-        dataset_kwargs["name"] = dataset_config
-
-    dataset_normalized = dataset_id.lower()
-    if dataset_normalized == "seacrowd/thai_toxicity_tweet":
-        raw_dataset = _load_thai_toxicity_dataset(dataset_split)
-    elif dataset_normalized == "tmu-nlp/thai_toxicity_tweet":
-        raw_dataset = _load_thai_toxicity_dataset(dataset_split)
-    else:
-        raw_dataset = cast(
-            Dataset,
-            load_dataset(
-                dataset_id,
-                split=dataset_split,
-                **dataset_kwargs,
-            ),
-        )
-
-    if not isinstance(text_column, str):  # defensive guard for static type checkers
-        raise TypeError("hf_text_column must resolve to a string value")
-    if text_column not in raw_dataset.column_names:
-        raise ValueError(
-            f"Text column '{text_column}' not found in dataset '{dataset_id}'. Available columns: {raw_dataset.column_names}"
-        )
-    if not isinstance(label_column, str):
-        raise TypeError("hf_label_column must resolve to a string value")
-    if label_column not in raw_dataset.column_names:
-        raise ValueError(
-            f"Label column '{label_column}' not found in dataset '{dataset_id}'. Available columns: {raw_dataset.column_names}"
-        )
-
-    df = cast(pd.DataFrame, raw_dataset.to_pandas())
-    df = df[[text_column, label_column]].copy()
-    df = df.rename(columns={text_column: "Message", label_column: "label"})
-    df = df.dropna(subset=["Message", "label"])
-
-    df["Message"] = df["Message"].astype(str).str.strip()
-    df = df[df["Message"].str.len() > 0]
-    df = df[df["Message"].str.upper() != "TWEET_NOT_FOUND"]
-
-    label_feature = raw_dataset.features[label_column]
-
-    alias_map = {
-        "toxic": LABEL2ID["hatespeech"],
-        "1": LABEL2ID["hatespeech"],
-        "non-toxic": LABEL2ID["nonhatespeech"],
-        "nontoxic": LABEL2ID["nonhatespeech"],
-        "0": LABEL2ID["nonhatespeech"],
-    }
-
-    def _coerce_label(value: Any) -> int | None:
-        if isinstance(label_feature, ClassLabel):
-            if isinstance(value, str) and value.isdigit():
-                value = int(value)
-            if isinstance(value, (int, np.integer)):
-                names = label_feature.names
-                if 0 <= int(value) < len(names):
-                    lookup = names[int(value)]
-                    mapped = LABEL2ID.get(str(lookup))
-                    if mapped is not None:
-                        return mapped
-                if int(value) in LABEL2ID.values():
-                    return int(value)
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in LABEL2ID:
-                    return LABEL2ID[lowered]
-                if lowered in alias_map:
-                    return alias_map[lowered]
-        else:
-            if isinstance(value, str):
-                lowered = value.strip().lower()
-                if lowered in LABEL2ID:
-                    return LABEL2ID[lowered]
-                if lowered in alias_map:
-                    return alias_map[lowered]
-                if lowered.isdigit():
-                    value = int(lowered)
-            if isinstance(value, (int, np.integer)):
-                if int(value) in LABEL2ID.values():
-                    return int(value)
-                if int(value) in (0, 1):
-                    return int(value)
-        return None
-
-    df["label"] = df["label"].map(_coerce_label)
-    df = df.dropna(subset=["label"])
-    df["label"] = df["label"].astype(int)
-
-    return df[["Message", "label"]]
-
-
 def _split_dataset(
     df: pd.DataFrame, test_size: float, seed: int
 ) -> Tuple[Dataset, Dataset]:
@@ -302,45 +167,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/HateThaiSent.csv"),
         help="Path to the labelled CSV dataset.",
-    )
-    parser.add_argument(
-        "--hf-dataset-id",
-        default="SEACrowd/thai_toxicity_tweet",
-        help=(
-            "Hugging Face dataset identifier to append to the CSV data (defaults to "
-            "'SEACrowd/thai_toxicity_tweet')."
-        ),
-    )
-    parser.add_argument(
-        "--hf-dataset-config",
-        default=None,
-        help="Optional dataset configuration name used with --hf-dataset-id.",
-    )
-    parser.add_argument(
-        "--hf-dataset-split",
-        default="train",
-        help="Hugging Face dataset split to load when --hf-dataset-id is set.",
-    )
-    parser.add_argument(
-        "--hf-text-column",
-        default=None,
-        help=(
-            "Text column in the Hugging Face dataset (defaults to 'tweet_text' when "
-            "using SEACrowd/thai_toxicity_tweet)."
-        ),
-    )
-    parser.add_argument(
-        "--hf-label-column",
-        default=None,
-        help=(
-            "Label column in the Hugging Face dataset (defaults to 'is_toxic' when "
-            "using SEACrowd/thai_toxicity_tweet)."
-        ),
-    )
-    parser.add_argument(
-        "--no-hf-dataset",
-        action="store_true",
-        help="Disable loading the Hugging Face dataset (use CSV-only training).",
     )
     parser.add_argument(
         "--model-name",
@@ -500,52 +326,7 @@ def main() -> None:
         raise ValueError("fp16 and bf16 modes are mutually exclusive; choose only one.")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    dataframes: List[pd.DataFrame] = []
-
-    hf_dataset_id = None if args.no_hf_dataset else (args.hf_dataset_id or None)
-
-    if args.data is not None:
-        if args.data.exists():
-            dataframes.append(_load_dataframe(args.data))
-        elif not hf_dataset_id:
-            raise FileNotFoundError(f"CSV dataset '{args.data}' not found.")
-        else:
-            print(f"Warning: CSV dataset '{args.data}' not found; continuing without it.")
-
-    if hf_dataset_id:
-        text_column = args.hf_text_column
-        label_column = args.hf_label_column
-        if hf_dataset_id.lower() == "seacrowd/thai_toxicity_tweet":
-            text_column = text_column or "tweet_text"
-            label_column = label_column or "is_toxic"
-        missing_fields = []
-        if text_column is None:
-            missing_fields.append("--hf-text-column")
-        if label_column is None:
-            missing_fields.append("--hf-label-column")
-        if missing_fields:
-            missing = ", ".join(missing_fields)
-            raise ValueError(
-                f"Missing required argument(s) {missing} for dataset '{hf_dataset_id}'."
-            )
-
-        hf_df = _load_hf_dataframe(
-            dataset_id=hf_dataset_id,
-            text_column=text_column,
-            label_column=label_column,
-            dataset_config=args.hf_dataset_config,
-            dataset_split=args.hf_dataset_split,
-        )
-        dataframes.append(hf_df)
-
-    if not dataframes:
-        raise ValueError(
-            "No training data sources were provided. Supply --data and/or --hf-dataset-id."
-        )
-
-    df = pd.concat(dataframes, ignore_index=True)
-    df = df.drop_duplicates(subset=["Message", "label"]).reset_index(drop=True)
-
+    df = _load_dataframe(args.data)
     train_ds, eval_ds = _split_dataset(df, args.test_size, args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
