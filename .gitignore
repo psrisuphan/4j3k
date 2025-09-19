@@ -1,6 +1,6 @@
-__pycache__/
 venv/
 models/
 *.safetensors
 *.pt
 *.bin
+__pycache__/
