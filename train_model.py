@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,10 @@ from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
 import pandas as pd
+import requests
 from datasets import ClassLabel, Dataset, DatasetDict, Features, Value, load_dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import zipfile
 import torch
 from transformers import (
     AutoModelForSequenceClassification,
@@ -109,6 +112,35 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     return df[["Message", "label"]]
 
 
+def _load_thai_toxicity_dataset(split: str) -> Dataset:
+    """Download and load the Thai Toxicity Tweet dataset without relying on HF scripts."""
+
+    if split != "train":
+        raise ValueError(
+            "SEACrowd/thai_toxicity_tweet only provides a 'train' split; "
+            f"received '{split}'."
+        )
+
+    zip_url = "https://archive.org/download/ThaiToxicityTweetCorpus/data.zip"
+    try:
+        response = requests.get(zip_url, timeout=60)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            "Failed to download Thai Toxicity Tweet corpus from archive.org. "
+            "Check your network connection or specify --no-hf-dataset to skip it."
+        ) from exc
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            with zf.open("data/train.jsonl") as fh:
+                df = pd.read_json(fh, lines=True)
+    except (KeyError, zipfile.BadZipFile, ValueError) as exc:
+        raise RuntimeError("Downloaded Thai toxicity archive is corrupted or has unexpected format.") from exc
+
+    return Dataset.from_pandas(df, preserve_index=False)
+
+
 def _load_hf_dataframe(
     dataset_id: str,
     text_column: str,
@@ -122,7 +154,20 @@ def _load_hf_dataframe(
     if dataset_config:
         dataset_kwargs["name"] = dataset_config
 
-    raw_dataset = cast(Dataset, load_dataset(dataset_id, split=dataset_split, **dataset_kwargs))
+    dataset_normalized = dataset_id.lower()
+    if dataset_normalized == "seacrowd/thai_toxicity_tweet":
+        raw_dataset = _load_thai_toxicity_dataset(dataset_split)
+    elif dataset_normalized == "tmu-nlp/thai_toxicity_tweet":
+        raw_dataset = _load_thai_toxicity_dataset(dataset_split)
+    else:
+        raw_dataset = cast(
+            Dataset,
+            load_dataset(
+                dataset_id,
+                split=dataset_split,
+                **dataset_kwargs,
+            ),
+        )
 
     if not isinstance(text_column, str):  # defensive guard for static type checkers
         raise TypeError("hf_text_column must resolve to a string value")
