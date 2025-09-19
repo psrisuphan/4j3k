@@ -128,7 +128,12 @@ def _enforce_memory_safe_defaults(args: argparse.Namespace, target_device: str) 
             )
             args.batch_size = 4
 
-    if not args.gradient_checkpointing and args.batch_size <= 4:
+    enable_checkpointing = (
+        target_device in {"cuda"}
+        and not args.gradient_checkpointing
+        and args.batch_size <= 4
+    )
+    if enable_checkpointing:
         print(
             "[memory-safe] Enabling gradient checkpointing to shrink activation footprint.",
             flush=True,
@@ -468,11 +473,10 @@ def main() -> None:
         metric_for_best_model="f1",
         do_eval=True,
         dataloader_num_workers=dataloader_workers,
-        dataloader_pin_memory=use_cuda or use_mps,
-        no_cuda=not (use_cuda or use_mps),
-        use_mps_device=use_mps,
-        fp16=args.fp16,
-        bf16=args.bf16,
+        dataloader_pin_memory=use_cuda,
+        no_cuda=not use_cuda,
+        fp16=args.fp16 and use_cuda,
+        bf16=args.bf16 and use_cuda,
         warmup_steps=max(0, args.warmup_steps),
         warmup_ratio=max(0.0, args.warmup_ratio) if args.warmup_steps <= 0 else 0.0,
         gradient_checkpointing=args.gradient_checkpointing,
