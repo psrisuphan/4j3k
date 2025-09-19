@@ -100,6 +100,42 @@ def _configure_trainable_layers(
         for param in layer.parameters():
             param.requires_grad = True
 
+def _enforce_memory_safe_defaults(args: argparse.Namespace, target_device: str) -> None:
+    """Best-effort adjustments to curb OOM risk across devices."""
+
+    if target_device == "mps":
+        if "PYTORCH_MPS_HIGH_WATERMARK_RATIO" not in os.environ:
+            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.80"
+        if args.batch_size > 2:
+            print(
+                f"[memory-safe] Reducing MPS batch size from {args.batch_size} to 2 to ease memory pressure.",
+                flush=True,
+            )
+            args.batch_size = 2
+    elif target_device == "cuda":
+        if not (0.0 < args.max_gpu_memory_fraction <= 1.0):
+            args.max_gpu_memory_fraction = 0.9
+        elif args.max_gpu_memory_fraction > 0.9:
+            print(
+                f"[memory-safe] Clamping CUDA memory fraction from {args.max_gpu_memory_fraction:.2f} to 0.90.",
+                flush=True,
+            )
+            args.max_gpu_memory_fraction = 0.9
+        if args.batch_size > 4:
+            print(
+                f"[memory-safe] Reducing CUDA batch size from {args.batch_size} to 4 to conserve VRAM.",
+                flush=True,
+            )
+            args.batch_size = 4
+
+    if not args.gradient_checkpointing and args.batch_size <= 4:
+        print(
+            "[memory-safe] Enabling gradient checkpointing to shrink activation footprint.",
+            flush=True,
+        )
+        args.gradient_checkpointing = True
+
+
 def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     df = df.dropna(subset=["Message", "Hatespeech"])
@@ -385,6 +421,7 @@ def main() -> None:
     )
 
     target_device = _resolve_target_device(args.device)
+    _enforce_memory_safe_defaults(args, target_device)
     use_cuda = target_device == "cuda"
     use_mps = target_device == "mps"
 
