@@ -1,5 +1,6 @@
 # ForJustice3K
-A browser extension designed to detect and filter hate speech in Thai-language posts and comments across social media platforms. The tool automatically identifies harmful or abusive language and blocks it by default, while giving users the option to unblock the content if they choose.
+A AI model designed to detect hatespeech from message given. Based on [WangchanBERTa](https://huggingface.co/airesearch/wangchanberta-base-att-spm-uncased).
+Trained with [HateThaiSent](https://github.com/dsmlr/HateThaiSent), [ThaiToxicityTweetCorpus](https://github.com/tmu-nlp/ThaiToxicityTweetCorpus).
 
 **Group project for Artificial intelligence.
 
@@ -64,6 +65,10 @@ The script prints per-sentence decisions, reports accuracy when `expected` label
 - Integrate the exported model directory into the browser extension packaging workflow.
 - Adjust `age_policy.py` if you need different moderation thresholds per age bracket.
 - Run `csv_output.py` during data exploration to inspect label distribution and spot missing values.
+
+## Model credit
+
+L. Lowphansirikul, C. Polpanumas, N. Jantrakulchai, and S. Nutanong, "WangchanBERTa: Pretraining transformer-based Thai language models," arXiv preprint arXiv:2101.09635, 2021. [Online]. Available: https://arxiv.org/abs/2101.09635.
 
 ## Dataset credits
 
