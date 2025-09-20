@@ -546,6 +546,9 @@ def main() -> None:
     use_cuda = target_device == "cuda"
     use_mps = target_device == "mps"
     use_dml = target_device == "dml"
+    print(f"[device] Using {target_device} backend.", flush=True)
+    if use_dml:
+        print("[device] DirectML active; monitor GPU via Task Manager (GPU 1).", flush=True)
 
     if use_cuda:
         _configure_cuda_runtime(args)

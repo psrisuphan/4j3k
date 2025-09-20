@@ -1,5 +1,6 @@
 pandas
 torch
+accelerate>=0.26
 torch-directml; platform_system == "Windows"
 transformers
 datasets
