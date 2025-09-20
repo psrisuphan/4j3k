@@ -1,5 +1,6 @@
 pandas
 torch
+torch-directml; platform_system == "Windows"
 transformers
 datasets
 scikit-learn

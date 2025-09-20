@@ -20,6 +20,11 @@ from transformers import (
     TrainingArguments,
 )
 
+try:  # Optional dependency for Windows DirectML support
+    import torch_directml  # type: ignore
+except Exception:  # pragma: no cover - optional runtime import
+    torch_directml = None
+
 LABEL2ID: Dict[str, int] = {"nonhatespeech": 0, "hatespeech": 1}
 ID2LABEL: Dict[int, str] = {v: k for k, v in LABEL2ID.items()}
 
@@ -32,6 +37,30 @@ def _is_rocm_runtime() -> bool:
     torch_version = getattr(torch, "version", None)
     hip_version = getattr(torch_version, "hip", None) if torch_version is not None else None
     return bool(hip_version)
+
+
+def _has_directml() -> bool:
+    """Return True when torch-directml is available and initialises successfully."""
+
+    if torch_directml is None:
+        return False
+    try:
+        torch_directml.device()
+    except Exception:
+        return False
+    return True
+
+
+def _is_t4_gpu() -> bool:
+    """Heuristically detect NVIDIA T4 when CUDA is available."""
+
+    if not torch.cuda.is_available():
+        return False
+    try:
+        name = torch.cuda.get_device_name(0).lower()
+    except torch.cuda.CudaError:
+        return False
+    return "t4" in name
 
 
 def _resolve_target_device(requested: str) -> str:
@@ -55,6 +84,10 @@ def _resolve_target_device(requested: str) -> str:
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             return "mps"
         raise RuntimeError("MPS requested but no Apple GPU backend is available.")
+    if choice in {"dml", "directml"}:
+        if _has_directml():
+            return "dml"
+        raise RuntimeError("DirectML requested but torch-directml is not available.")
     if choice != "auto":
         raise ValueError(f"Unsupported device selection '{requested}'.")
 
@@ -62,6 +95,8 @@ def _resolve_target_device(requested: str) -> str:
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
+    if _has_directml():
+        return "dml"
     if _is_rocm_runtime():
         # hip runtime present but no visible device – fall back to CPU to stay safe
         return "cpu"
@@ -143,6 +178,71 @@ def _enforce_memory_safe_defaults(args: argparse.Namespace, target_device: str) 
         )
         args.gradient_checkpointing = True
 
+
+def _configure_cuda_runtime(args: argparse.Namespace) -> None:
+    """Apply runtime tweaks tuned for single-GPU Colab (e.g., NVIDIA T4)."""
+
+    if not torch.cuda.is_available():
+        return
+
+    torch.cuda.set_device(0)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = True
+
+    if args.bf16:
+        return
+
+    if not args.fp16:
+        if _is_t4_gpu():
+            print("[cuda] Detected NVIDIA T4; enabling fp16 mixed precision for better throughput.", flush=True)
+        else:
+            print("[cuda] Enabling fp16 mixed precision (override with --bf16/--fp16).", flush=True)
+        args.fp16 = True
+
+
+def _configure_cpu_runtime(args: argparse.Namespace) -> None:
+    """Tune PyTorch thread settings when falling back to CPU execution."""
+
+    threads = args.cpu_threads or (os.cpu_count() or 1)
+    torch.set_num_threads(threads)
+    torch.set_num_interop_threads(max(1, min(threads, 4)))
+    if torch.backends.mkldnn.is_available():
+        torch.backends.mkldnn.enabled = True
+    torch.set_float32_matmul_precision("medium")
+
+
+class DirectMLTrainer(Trainer):
+    """Thin Trainer wrapper that keeps tensors on a DirectML device."""
+
+    def __init__(self, *args, **kwargs):
+        if torch_directml is None:
+            raise RuntimeError(
+                "DirectML requested but torch-directml is not installed."
+            )
+        super().__init__(*args, **kwargs)
+        self._dml_device = torch_directml.device()
+        self.model.to(self._dml_device)
+        # Trainer inspects these fields to gate CUDA-specific branches.
+        if hasattr(self.args, "_n_gpu"):
+            self.args._n_gpu = 0
+        if hasattr(self.args, "ParallelMode") and hasattr(self.args, "_parallel_mode"):
+            self.args._parallel_mode = self.args.ParallelMode.NOT_PARALLEL
+
+    def _prepare_inputs(self, inputs):  # type: ignore[override]
+        return self._move_to_device(inputs, self._dml_device)
+
+    def _move_to_device(self, inputs, device):
+        if isinstance(inputs, dict):
+            return {k: self._move_to_device(v, device) for k, v in inputs.items()}
+        if isinstance(inputs, (list, tuple)):
+            return type(inputs)(self._move_to_device(v, device) for v in inputs)
+        if torch.is_tensor(inputs):
+            return inputs.to(device)
+        return inputs
+
+    def prediction_step(self, model, inputs, *args, **kwargs):  # type: ignore[override]
+        inputs = self._prepare_inputs(inputs)
+        return super().prediction_step(model, inputs, *args, **kwargs)
 
 def _load_dataframe(csv_path: Path) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
@@ -291,7 +391,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--device",
-        choices=("auto", "cpu", "cuda", "mps", "rocm", "hip", "gpu"),
+        choices=("auto", "cpu", "cuda", "mps", "rocm", "hip", "gpu", "dml", "directml"),
         default="auto",
         help="Preferred execution device; defaults to automatic accelerator detection.",
     )
@@ -432,6 +532,10 @@ def main() -> None:
     _enforce_memory_safe_defaults(args, target_device)
     use_cuda = target_device == "cuda"
     use_mps = target_device == "mps"
+    use_dml = target_device == "dml"
+
+    if use_cuda:
+        _configure_cuda_runtime(args)
 
     pad_to_multiple = 8 if use_cuda else None
     data_collator = DataCollatorWithPadding(
@@ -454,12 +558,21 @@ def main() -> None:
         os.environ.setdefault("HIP_VISIBLE_DEVICES", os.environ.get("HIP_VISIBLE_DEVICES", "0"))
 
     if target_device == "cpu":
-        threads = args.cpu_threads or (os.cpu_count() or 1)
-        torch.set_num_threads(threads)
-        torch.set_num_interop_threads(max(1, min(threads, 4)))
-        if torch.backends.mkldnn.is_available():
-            torch.backends.mkldnn.enabled = True
-        torch.set_float32_matmul_precision("medium")
+        _configure_cpu_runtime(args)
+
+    if use_cuda and args.fp16:
+        matmul_backend = getattr(torch.backends.cuda, "matmul", None)
+        if matmul_backend is not None and hasattr(matmul_backend, "allow_tf32"):
+            matmul_backend.allow_tf32 = False
+        if hasattr(torch.backends, "cudnn") and hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = False
+
+    if use_dml and args.fp16:
+        print("[directml] Mixed precision (fp16) is not supported on DirectML; disabling.", flush=True)
+        args.fp16 = False
+    if use_dml and args.bf16:
+        print("[directml] Mixed precision (bf16) is not supported on DirectML; disabling.", flush=True)
+        args.bf16 = False
 
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
@@ -485,6 +598,7 @@ def main() -> None:
         gradient_checkpointing=args.gradient_checkpointing,
         group_by_length=args.group_by_length,
         torch_compile=args.torch_compile,
+        fp16_full_eval=args.fp16 and use_cuda,
     )
 
     if use_cuda and 0.0 < args.max_gpu_memory_fraction < 1.0:
@@ -493,7 +607,7 @@ def main() -> None:
         except (AttributeError, RuntimeError):
             pass
 
-    trainer = Trainer(
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         data_collator=data_collator,
@@ -501,6 +615,38 @@ def main() -> None:
         eval_dataset=eval_dataset,
         compute_metrics=_compute_metrics,
     )
+
+    trainer_cls = DirectMLTrainer if use_dml else Trainer
+
+    def _fallback_to_cpu(reason: str) -> Trainer:
+        print(reason, flush=True)
+        model.to("cpu")
+        _configure_cpu_runtime(args)
+        training_args.no_cuda = True
+        training_args.fp16 = False
+        training_args.bf16 = False
+        if hasattr(training_args, "_n_gpu"):
+            training_args._n_gpu = 0
+        return Trainer(**trainer_kwargs)
+
+    try:
+        trainer = trainer_cls(**trainer_kwargs)
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if use_dml:
+            trainer = _fallback_to_cpu(
+                f"[directml] Failed to initialise DirectML backend ({exc}); falling back to CPU."
+            )
+        elif use_cuda and any(token in message for token in {"cuda", "cublas", "cudnn", "hip"}):
+            trainer = _fallback_to_cpu(
+                f"[cuda] Initialisation failed ({exc}); reverting to CPU execution."
+            )
+        elif use_mps and "mps" in message:
+            trainer = _fallback_to_cpu(
+                f"[mps] Initialisation failed ({exc}); reverting to CPU execution."
+            )
+        else:
+            raise
     trainer.tokenizer = tokenizer
 
     trainer.train()

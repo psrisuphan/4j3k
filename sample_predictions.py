@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default=None,
-        help="Optional device override such as 'cpu' or 'cuda'.",
+        help="Optional device override such as 'cpu', 'cuda', or 'dml'.",
     )
     parser.add_argument(
         "--input",
