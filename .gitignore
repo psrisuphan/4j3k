@@ -1,8 +1,65 @@
+# Environment directories
 venv/
 windows_venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python caches and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Logs and coverage reports
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+pytest_debug.log
+.pytest_cache/
+coverage.xml
+nosetests.xml
+
+# Type checker caches
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Model artifacts
 models/
 *.safetensors
 *.pt
 *.bin
-.vscode/
-__pycache__/
+
+# Operating system cruft
+.DS_Store
+Thumbs.db
+
+# Local configuration
+.python-version
+.env
+*.env
