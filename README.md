@@ -56,7 +56,7 @@ Training writes evaluation metrics to `models/wangchanberta-hatespeech/eval_metr
 Use `sample_predictions.py` for quick qualitative checks or to score your own sentences in bulk:
 
 ```bash
-python sample_predictions.py --model models/wangchanberta-hatespeech --input sentences.txt --output predictions.csv
+python sample_predictions.py --model models/wangchanberta-hatespeech --input sentences.jsonl --output predictions.csv
 ```
 
 The script prints per-sentence decisions, reports accuracy when `expected` labels are provided, and can export a CSV for downstream analysis.
