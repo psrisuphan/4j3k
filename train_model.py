@@ -179,6 +179,19 @@ def _enforce_memory_safe_defaults(args: argparse.Namespace, target_device: str) 
         args.gradient_checkpointing = True
 
 
+def _load_tokenizer(model_name: str) -> PreTrainedTokenizerBase:
+    """Load tokenizer with graceful fallback when fast variant is unavailable."""
+
+    try:
+        return AutoTokenizer.from_pretrained(model_name)
+    except (TypeError, ValueError, OSError, AttributeError) as exc:
+        print(
+            f"[tokenizer] Falling back to slow tokenizer for '{model_name}' due to: {exc}",
+            flush=True,
+        )
+        return AutoTokenizer.from_pretrained(model_name, use_fast=False)
+
+
 def _configure_cuda_runtime(args: argparse.Namespace) -> None:
     """Apply runtime tweaks tuned for single-GPU Colab (e.g., NVIDIA T4)."""
 
@@ -324,7 +337,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-name",
-        default="airesearch/wangchanberta-base-wiki-newmm",
+        default="airesearch/wangchanberta-base-att-spm-uncased",
         help="Backbone model to fine-tune.",
     )
     parser.add_argument(
@@ -502,7 +515,7 @@ def main() -> None:
 
     train_ds, eval_ds = _split_dataset(df, args.test_size, args.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    tokenizer = _load_tokenizer(args.model_name)
     tokenized_train = _tokenize(tokenizer, train_ds, args.max_length)
     tokenized_eval = _tokenize(tokenizer, eval_ds, args.max_length)
 

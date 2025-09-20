@@ -87,7 +87,7 @@ class TransformerAgeAwareClassifier:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model directory {self.model_path} not found")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+        self.tokenizer = _load_tokenizer(str(self.model_path))
         self.model = AutoModelForSequenceClassification.from_pretrained(self.model_path)
         self.model.eval()
 
@@ -222,3 +222,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+def _load_tokenizer(model_name: str):
+    try:
+        return AutoTokenizer.from_pretrained(model_name)
+    except (TypeError, ValueError, OSError, AttributeError) as exc:
+        print(
+            f"[tokenizer] Falling back to slow tokenizer for '{model_name}' due to: {exc}",
+            flush=True,
+        )
+        return AutoTokenizer.from_pretrained(model_name, use_fast=False)
