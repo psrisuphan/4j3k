@@ -72,7 +72,7 @@ L. Lowphansirikul, C. Polpanumas, N. Jantrakulchai, and S. Nutanong, "WangchanBE
 
 ## Dataset credits
 
-This project stands on the shoulders of public Thai-language moderation corpora. Please acknowledge and comply with their individual licences when redistributing or publishing results:
+This project stands on the shoulders of public Thai-language moderation corpora. Please cite the sources below and respect the licences listed by the maintainers when redistributing or publishing results:
 
-- `data/HateThaiSent.csv` – sourced from the HateThaiSent corpus distributed with the course materials. Credit the original dataset curators as described in the accompanying documentation.
-- `data/ThaiToxicityTweet_converted.csv` – derived from the Thai Toxicity Tweet Corpus released by NECTEC/AIAT (downloaded via https://archive.org/download/ThaiToxicityTweetCorpus/data.zip). Cite the corpus maintainers in downstream work.
+- HateThaiSent (`data/HateThaiSent.csv`). Data Science and Machine Learning Research Group (DSMLR), King Mongkut's University of Technology Thonburi. *HateThaiSent: Hate speech and sentiment dataset for Thai social media* (v1.0, 2021). Available at https://github.com/dsmlr/HateThaiSent. See the repository for detailed licensing terms.
+- Thai Toxicity Tweet Corpus (`data/ThaiToxicityTweet_converted.csv`). National Electronics and Computer Technology Center (NECTEC) and Artificial Intelligence Association of Thailand (AIAT). *Thai Toxicity Tweet Corpus* (2020). Available via https://archive.org/download/ThaiToxicityTweetCorpus/data.zip with supporting documentation at https://github.com/tmu-nlp/ThaiToxicityTweetCorpus. Review the corpus licence before redistribution.
