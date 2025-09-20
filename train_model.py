@@ -324,7 +324,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-name",
-        default="airesearch/wangchanberta-base-att-spm-uncased",
+        default="airesearch/wangchanberta-base-wiki-newmm",
         help="Backbone model to fine-tune.",
     )
     parser.add_argument(
