@@ -64,3 +64,10 @@ The script prints per-sentence decisions, reports accuracy when `expected` label
 - Integrate the exported model directory into the browser extension packaging workflow.
 - Adjust `age_policy.py` if you need different moderation thresholds per age bracket.
 - Run `csv_output.py` during data exploration to inspect label distribution and spot missing values.
+
+## Dataset credits
+
+This project stands on the shoulders of public Thai-language moderation corpora. Please acknowledge and comply with their individual licences when redistributing or publishing results:
+
+- `data/HateThaiSent.csv` – sourced from the HateThaiSent corpus distributed with the course materials. Credit the original dataset curators as described in the accompanying documentation.
+- `data/ThaiToxicityTweet_converted.csv` – derived from the Thai Toxicity Tweet Corpus released by NECTEC/AIAT (downloaded via https://archive.org/download/ThaiToxicityTweetCorpus/data.zip). Cite the corpus maintainers in downstream work.
