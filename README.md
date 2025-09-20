@@ -60,6 +60,7 @@ python sample_predictions.py --model models/wangchanberta-hatespeech --input sen
 ```
 
 The script prints per-sentence decisions, reports accuracy when `expected` labels are provided, and can export a CSV for downstream analysis.
+Default demo prompts now live in `sample_sentences.jsonl`; edit that file to tweak the built-in examples or pass a custom `.jsonl`/plain-text file through `--input`.
 
 ### 7. Next steps
 - Integrate the exported model directory into the browser extension packaging workflow.
