@@ -592,7 +592,7 @@ def main() -> None:
 
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
-        eval_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="epoch",
         learning_rate=args.learning_rate,
         lr_scheduler_type=args.lr_scheduler,
