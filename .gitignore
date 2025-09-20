@@ -1,4 +1,5 @@
 venv/
+windows_venv/
 models/
 *.safetensors
 *.pt
