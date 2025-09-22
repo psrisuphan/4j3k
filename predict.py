@@ -94,7 +94,13 @@ class TransformerAgeAwareClassifier:
         max_len = getattr(self.tokenizer, "model_max_length", 512)
         if not isinstance(max_len, int) or max_len <= 0 or max_len > 4096:
             max_len = 512
-        self.max_length = max_len
+
+        config_max_positions = getattr(self.model.config, "max_position_embeddings", None)
+        if isinstance(config_max_positions, int) and config_max_positions > 2:
+            # Leave room for special tokens so position_ids stay within the embedding table.
+            max_len = min(max_len, config_max_positions - 2)
+
+        self.max_length = max(max_len, 8)
 
         self.device = _select_device(device)
         self._dml_device = None

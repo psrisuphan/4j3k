@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from age_policy import resolve_policy
 from predict import TransformerAgeAwareClassifier
@@ -97,11 +98,38 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional CSV path to store the scoring results.",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path used as the base name for a text log. "
+            "A timestamp suffix is appended automatically."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    log_path: Optional[Path] = None
+    log_lines: List[str] = []
+
+    if args.log_file is not None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = args.log_file
+        if base.suffix:
+            filename = f"{base.stem}-{timestamp}{base.suffix}"
+        else:
+            filename = f"{base.name}-{timestamp}.log"
+        log_path = base.with_name(filename)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def emit(message: str) -> None:
+        print(message)
+        if log_path is not None:
+            log_lines.append(message)
+
     sentences = _read_sentences(args.input)
 
     if not sentences:
@@ -110,7 +138,7 @@ def main() -> None:
     classifier = TransformerAgeAwareClassifier(args.model, device=args.device)
     policy = resolve_policy(args.age)
 
-    print(f"Using age policy: {policy}")
+    emit(f"Using age policy: {policy}")
 
     rows = []
     correct = 0
@@ -130,7 +158,7 @@ def main() -> None:
                 correct += 1
 
         expected_str = "?" if expected is None else str(expected)
-        print(
+        emit(
             f"{idx:02d}. score={score:.4f} block={should_block} expected={expected_str} text={text}"
         )
         rows.append(
@@ -147,11 +175,15 @@ def main() -> None:
         )
 
     if total_with_labels:
-        print(f"Accuracy: {correct}/{total_with_labels}")
+        emit(f"Accuracy: {correct}/{total_with_labels}")
 
     if args.output is not None:
         _write_csv(rows, args.output)
-        print(f"Saved results to {args.output}")
+        emit(f"Saved results to {args.output}")
+
+    if log_path is not None and log_lines:
+        log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
+        print(f"Saved log to {log_path}")
 
 
 if __name__ == "__main__":
