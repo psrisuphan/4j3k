@@ -19,6 +19,17 @@ except Exception:  # pragma: no cover - optional runtime import
     torch_directml = None
 
 
+def _load_tokenizer(model_name: str):
+    try:
+        return AutoTokenizer.from_pretrained(model_name)
+    except (TypeError, ValueError, OSError, AttributeError) as exc:
+        print(
+            f"[tokenizer] Falling back to slow tokenizer for '{model_name}' due to: {exc}",
+            flush=True,
+        )
+        return AutoTokenizer.from_pretrained(model_name, use_fast=False)
+
+
 def _has_directml() -> bool:
     if torch_directml is None:
         return False
@@ -228,12 +239,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-def _load_tokenizer(model_name: str):
-    try:
-        return AutoTokenizer.from_pretrained(model_name)
-    except (TypeError, ValueError, OSError, AttributeError) as exc:
-        print(
-            f"[tokenizer] Falling back to slow tokenizer for '{model_name}' due to: {exc}",
-            flush=True,
-        )
-        return AutoTokenizer.from_pretrained(model_name, use_fast=False)
