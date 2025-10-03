@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 from pathlib import Path
@@ -317,6 +318,21 @@ def _compute_metrics(pred):
     }
 
 
+def _filter_supported_kwargs(
+    callable_obj: Any, kwargs: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[str], Tuple[str, ...]]:
+    """Return supported kwargs, the dropped keys, and the supported parameter names."""
+
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return kwargs, [], tuple(kwargs)
+    supported = tuple(signature.parameters)
+    matched = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    dropped = [key for key in kwargs if key not in signature.parameters]
+    return matched, dropped, supported
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -590,32 +606,52 @@ def main() -> None:
         print("[directml] Mixed precision (bf16) is not supported on DirectML; disabling.", flush=True)
         args.bf16 = False
 
-    training_args = TrainingArguments(
-        output_dir=str(args.output_dir),
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        learning_rate=args.learning_rate,
-        lr_scheduler_type=args.lr_scheduler,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        gradient_accumulation_steps=max(1, args.gradient_accumulation),
-        num_train_epochs=args.epochs,
-        weight_decay=args.weight_decay,
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        do_eval=True,
-        dataloader_num_workers=dataloader_workers,
-        dataloader_pin_memory=use_cuda,
-        no_cuda=not use_cuda,
-        fp16=args.fp16 and use_cuda,
-        bf16=args.bf16 and use_cuda,
-        warmup_steps=max(0, args.warmup_steps),
-        warmup_ratio=max(0.0, args.warmup_ratio) if args.warmup_steps <= 0 else 0.0,
-        gradient_checkpointing=args.gradient_checkpointing,
-        group_by_length=args.group_by_length,
-        torch_compile=args.torch_compile,
-        fp16_full_eval=args.fp16 and use_cuda,
+    training_args_kwargs = {
+        "output_dir": str(args.output_dir),
+        "evaluation_strategy": "epoch",
+        "save_strategy": "epoch",
+        "learning_rate": args.learning_rate,
+        "lr_scheduler_type": args.lr_scheduler,
+        "per_device_train_batch_size": args.batch_size,
+        "per_device_eval_batch_size": args.batch_size,
+        "gradient_accumulation_steps": max(1, args.gradient_accumulation),
+        "num_train_epochs": args.epochs,
+        "weight_decay": args.weight_decay,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "f1",
+        "do_eval": True,
+        "dataloader_num_workers": dataloader_workers,
+        "dataloader_pin_memory": use_cuda,
+        "no_cuda": not use_cuda,
+        "fp16": args.fp16 and use_cuda,
+        "bf16": args.bf16 and use_cuda,
+        "warmup_steps": max(0, args.warmup_steps),
+        "warmup_ratio": max(0.0, args.warmup_ratio) if args.warmup_steps <= 0 else 0.0,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "group_by_length": args.group_by_length,
+        "torch_compile": args.torch_compile,
+        "fp16_full_eval": args.fp16 and use_cuda,
+    }
+
+    filtered_kwargs, dropped_kwargs, supported_params = _filter_supported_kwargs(
+        TrainingArguments.__init__, training_args_kwargs
     )
+    if dropped_kwargs:
+        print(
+            "[compat] Dropping unsupported TrainingArguments parameters: "
+            + ", ".join(sorted(dropped_kwargs)),
+            flush=True,
+        )
+
+    # Older Transformers releases use evaluate_during_training instead of evaluation_strategy.
+    if (
+        "evaluation_strategy" in training_args_kwargs
+        and "evaluation_strategy" not in supported_params
+        and "evaluate_during_training" in supported_params
+    ):
+        filtered_kwargs["evaluate_during_training"] = True
+
+    training_args = TrainingArguments(**filtered_kwargs)
 
     if use_cuda and 0.0 < args.max_gpu_memory_fraction < 1.0:
         try:
