@@ -643,13 +643,25 @@ def main() -> None:
             flush=True,
         )
 
+    supports_eval_strategy = "evaluation_strategy" in supported_params
+
     # Older Transformers releases use evaluate_during_training instead of evaluation_strategy.
     if (
         "evaluation_strategy" in training_args_kwargs
-        and "evaluation_strategy" not in supported_params
+        and not supports_eval_strategy
         and "evaluate_during_training" in supported_params
     ):
         filtered_kwargs["evaluate_during_training"] = True
+
+    if not supports_eval_strategy:
+        # Without evaluation strategy support, load_best_model_at_end cannot be satisfied safely.
+        for legacy_only_key in ("load_best_model_at_end", "metric_for_best_model"):
+            if legacy_only_key in filtered_kwargs:
+                print(
+                    f"[compat] Disabling '{legacy_only_key}' because evaluation strategy control is unavailable.",
+                    flush=True,
+                )
+                filtered_kwargs.pop(legacy_only_key, None)
 
     training_args = TrainingArguments(**filtered_kwargs)
 
