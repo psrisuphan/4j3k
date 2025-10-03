@@ -63,3 +63,4 @@ Thumbs.db
 .python-version
 .env
 *.env
+predictions.csv
