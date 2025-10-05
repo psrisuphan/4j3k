@@ -1,5 +1,5 @@
 # Group : ForJustice3K 
-A AI model designed to detect hatespeech from message given. Based on [WangchanBERTa](https://huggingface.co/airesearch/wangchanberta-base-att-spm-uncased).
+an AI model designed to detect hatespeech from message given. Based on [WangchanBERTa](https://huggingface.co/airesearch/wangchanberta-base-att-spm-uncased).
 Trained with [HateThaiSent](https://github.com/dsmlr/HateThaiSent), [ThaiToxicityTweetCorpus](https://github.com/tmu-nlp/ThaiToxicityTweetCorpus).
 
 **Group project for Artificial intelligence Class.
