@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pandas as pd
 from datasets import ClassLabel, Dataset, DatasetDict, Features, Value
@@ -267,8 +267,8 @@ def _load_dataframe(csv_path: Path) -> pd.DataFrame:
 
 
 def _split_dataset(
-    df: pd.DataFrame, test_size: float, seed: int
-) -> Tuple[Dataset, Dataset]:
+    df: pd.DataFrame, eval_size: float, test_size: float, seed: int
+) -> Tuple[Dataset, Optional[Dataset], Optional[Dataset]]:
     label_names = [ID2LABEL[idx] for idx in range(len(ID2LABEL))]
     features = Features(
         {
@@ -277,12 +277,39 @@ def _split_dataset(
         }
     )
     base_dataset = Dataset.from_pandas(df, preserve_index=False, features=features)
+    total_holdout = eval_size + test_size
+    if total_holdout >= 1.0:
+        raise ValueError(
+            f"Invalid split configuration: eval_size ({eval_size}) + test_size ({test_size}) must be < 1.0."
+        )
+    if eval_size < 0.0 or test_size < 0.0:
+        raise ValueError("eval_size and test_size must be non-negative.")
+
+    if total_holdout <= 0.0:
+        return base_dataset, None, None
+
     split_dataset = base_dataset.train_test_split(
-        test_size=test_size,
+        test_size=total_holdout,
         seed=seed,
         stratify_by_column="label",
     )
-    return split_dataset["train"], split_dataset["test"]
+    train_dataset = split_dataset["train"]
+    holdout_dataset = split_dataset["test"]
+
+    if eval_size <= 0.0:
+        return train_dataset, None, holdout_dataset
+    if test_size <= 0.0:
+        return train_dataset, holdout_dataset, None
+
+    relative_test_size = test_size / total_holdout
+    holdout_split = holdout_dataset.train_test_split(
+        test_size=relative_test_size,
+        seed=seed,
+        stratify_by_column="label",
+    )
+    eval_dataset = holdout_split["train"]
+    test_dataset = holdout_split["test"]
+    return train_dataset, eval_dataset, test_dataset
 
 
 def _tokenize(tokenizer: PreTrainedTokenizerBase, dataset: Dataset, max_length: int) -> Dataset:
@@ -467,10 +494,16 @@ def parse_args() -> argparse.Namespace:
         help="Weight decay applied during training.",
     )
     parser.add_argument(
+        "--eval-size",
+        type=float,
+        default=0.10,
+        help="Validation split fraction used during fine-tuning.",
+    )
+    parser.add_argument(
         "--test-size",
         type=float,
-        default=0.15,
-        help="Holdout size fraction for evaluation.",
+        default=0.10,
+        help="Final test split fraction held back from training.",
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility."
@@ -529,15 +562,27 @@ def main() -> None:
     df = pd.concat(dataframes, ignore_index=True)
     df = df.drop_duplicates(subset=["Message", "label"]).reset_index(drop=True)
 
-    train_ds, eval_ds = _split_dataset(df, args.test_size, args.seed)
+    train_ds, eval_ds, test_ds = _split_dataset(df, args.eval_size, args.test_size, args.seed)
 
     tokenizer = _load_tokenizer(args.model_name)
     tokenized_train = _tokenize(tokenizer, train_ds, args.max_length)
-    tokenized_eval = _tokenize(tokenizer, eval_ds, args.max_length)
+    tokenized_eval = _tokenize(tokenizer, eval_ds, args.max_length) if eval_ds is not None else None
+    tokenized_test = _tokenize(tokenizer, test_ds, args.max_length) if test_ds is not None else None
 
-    dataset_dict = DatasetDict({"train": tokenized_train, "eval": tokenized_eval})
+    dataset_contents = {"train": tokenized_train}
+    if tokenized_eval is not None:
+        dataset_contents["eval"] = tokenized_eval
+    if tokenized_test is not None:
+        dataset_contents["test"] = tokenized_test
+    dataset_dict = DatasetDict(dataset_contents)
     train_dataset = cast(Any, dataset_dict["train"])  # appease static type checkers
-    eval_dataset = cast(Any, dataset_dict["eval"])  # appease static type checkers
+    eval_dataset = cast(Any, dataset_dict["eval"]) if "eval" in dataset_dict else None  # appease static type checkers
+    test_dataset = cast(Any, dataset_dict["test"]) if "test" in dataset_dict else None  # appease static type checkers
+
+    if eval_dataset is None:
+        raise ValueError(
+            "Validation split is empty; adjust --eval-size/--test-size or provide more data."
+        )
 
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name,
@@ -717,8 +762,15 @@ def main() -> None:
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
 
-    metrics = trainer.evaluate(cast(Any, eval_dataset))
-    serializable_metrics = {k: float(v) for k, v in metrics.items()}
+    metrics: Dict[str, float] = {}
+    if eval_dataset is not None:
+        eval_metrics = trainer.evaluate(eval_dataset=eval_dataset, metric_key_prefix="eval")
+        metrics.update({k: float(v) for k, v in eval_metrics.items()})
+    if test_dataset is not None:
+        test_metrics = trainer.evaluate(eval_dataset=test_dataset, metric_key_prefix="test")
+        metrics.update({k: float(v) for k, v in test_metrics.items()})
+
+    serializable_metrics = metrics
     metrics_path = args.output_dir / "eval_metrics.json"
     with metrics_path.open("w", encoding="utf-8") as fp:
         json.dump(serializable_metrics, fp, ensure_ascii=False, indent=2)
